@@ -9,7 +9,7 @@ describe UserActionsController do
     end
 
     it "returns a 404 for a user with a hidden profile" do
-      UserActionCreator.enable
+      UserActionManager.enable
       post = Fabricate(:post)
       post.user.user_option.update_column(:hide_profile_and_presence, true)
 
@@ -18,8 +18,8 @@ describe UserActionsController do
     end
 
     it 'renders list correctly' do
-      UserActionCreator.enable
-      post = Fabricate(:post)
+      UserActionManager.enable
+      post = create_post
 
       get "/user_actions.json", params: { username: post.user.username }
 
@@ -34,7 +34,7 @@ describe UserActionsController do
     end
 
     it 'can be filtered by acting_username' do
-      UserActionCreator.enable
+      UserActionManager.enable
       PostActionNotifier.enable
 
       post = Fabricate(:post)

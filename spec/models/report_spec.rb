@@ -472,15 +472,13 @@ describe Report do
       before do
         freeze_time DateTime.parse('2017-03-01 12:00')
 
-        UserActionCreator.enable
+        UserActionManager.enable
 
         arpit = Fabricate(:user)
         sam = Fabricate(:user)
 
         jeff = Fabricate(:user, created_at: 1.day.ago)
-        topic = Fabricate(:topic, user: jeff, created_at: 1.day.ago)
-        post = Fabricate(:post, topic: topic, user: jeff, created_at: 1.day.ago)
-
+        post = create_post(user: jeff, created_at: 1.day.ago)
         PostActionCreator.like(arpit, post)
         PostActionCreator.like(sam, post)
       end
@@ -622,8 +620,8 @@ describe Report do
       context "flags" do
         before do
           flagged_post = Fabricate(:post)
-          PostActionCreator.create(jeff, flagged_post, :off_topic)
-          PostAction.agree_flags!(flagged_post, jeff)
+          result = PostActionCreator.off_topic(jeff, flagged_post)
+          result.reviewable.perform(jeff, :agree)
         end
 
         it "returns the correct flag counts" do
@@ -970,18 +968,18 @@ describe Report do
       it "it works" do
         10.times do
           post_disagreed = Fabricate(:post)
-          PostActionCreator.create(joffrey, post_disagreed, :spam)
-          PostAction.clear_flags!(post_disagreed, moderator)
+          result = PostActionCreator.spam(joffrey, post_disagreed)
+          result.reviewable.perform(moderator, :disagree)
         end
 
         3.times do
           post_disagreed = Fabricate(:post)
-          PostActionCreator.create(robin, post_disagreed, :spam)
-          PostAction.clear_flags!(post_disagreed, moderator)
+          result = PostActionCreator.spam(robin, post_disagreed)
+          result.reviewable.perform(moderator, :disagree)
         end
         post_agreed = Fabricate(:post)
-        PostActionCreator.create(robin, post_agreed, :off_topic)
-        PostAction.agree_flags!(post_agreed, moderator)
+        result = PostActionCreator.off_topic(robin, post_agreed)
+        result.reviewable.perform(moderator, :agree)
 
         report = Report.find('user_flagging_ratio')
 

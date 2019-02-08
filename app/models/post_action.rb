@@ -21,8 +21,6 @@ class PostAction < ActiveRecord::Base
   scope :active, -> { where(disagreed_at: nil, deferred_at: nil, agreed_at: nil, deleted_at: nil) }
 
   after_save :update_counters
-  after_save :enforce_rules
-  after_save :create_user_action
   after_save :update_notifications
   after_create :create_notifications
   after_commit :notify_subscribers
@@ -145,14 +143,14 @@ class PostAction < ActiveRecord::Base
 
     post_actions = PostAction.active.flags.where(post_id: collection_ids)
 
-    user_actions = {}
+    counts_for = {}
     post_actions.each do |post_action|
-      user_actions[post_action.post_id] ||= {}
-      user_actions[post_action.post_id][post_action.post_action_type_id] ||= []
-      user_actions[post_action.post_id][post_action.post_action_type_id] << post_action
+      counts_for[post_action.post_id] ||= {}
+      counts_for[post_action.post_id][post_action.post_action_type_id] ||= []
+      counts_for[post_action.post_id][post_action.post_action_type_id] << post_action
     end
 
-    user_actions
+    counts_for
   end
 
   def self.count_per_day_for_type(post_action_type, opts = nil)
@@ -164,96 +162,6 @@ class PostAction < ActiveRecord::Base
     result.group('date(post_actions.created_at)')
       .order('date(post_actions.created_at)')
       .count
-  end
-
-  def self.agree_flags!(post, moderator, delete_post = false)
-    actions = PostAction.active
-      .where(post_id: post.id)
-      .where(post_action_type_id: PostActionType.notify_flag_types.values)
-
-    trigger_spam = false
-    actions.each do |action|
-      action.agreed_at = Time.zone.now
-      action.agreed_by_id = moderator.id
-      # so callback is called
-      action.save
-      action.add_moderator_post_if_needed(moderator, :agreed, delete_post)
-      trigger_spam = true if action.post_action_type_id == PostActionType.types[:spam]
-    end
-
-    # Update the flags_agreed user stat
-    UserStat.where(user_id: actions.map(&:user_id)).update_all("flags_agreed = flags_agreed + 1")
-
-    DiscourseEvent.trigger(:confirmed_spam_post, post) if trigger_spam
-
-    if actions.first.present?
-      DiscourseEvent.trigger(:flag_reviewed, post)
-      DiscourseEvent.trigger(:flag_agreed, actions.first)
-    end
-
-    update_flagged_posts_count
-  end
-
-  def self.clear_flags!(post, moderator)
-    # -1 is the automatic system cleary
-    action_type_ids =
-      if moderator.id == Discourse::SYSTEM_USER_ID
-        PostActionType.auto_action_flag_types.values
-      else
-        PostActionType.notify_flag_type_ids
-      end
-
-    actions = PostAction.active.where(post_id: post.id).where(post_action_type_id: action_type_ids)
-
-    actions.each do |action|
-      action.disagreed_at = Time.zone.now
-      action.disagreed_by_id = moderator.id
-      # so callback is called
-      action.save
-      action.add_moderator_post_if_needed(moderator, :disagreed)
-    end
-
-    # Update the flags_disagreed user stat
-    UserStat.where(user_id: actions.map(&:user_id)).update_all("flags_disagreed = flags_disagreed + 1")
-
-    # reset all cached counters
-    cached = {}
-    action_type_ids.each do |atid|
-      column = "#{PostActionType.types[atid]}_count"
-      cached[column] = 0 if ActiveRecord::Base.connection.column_exists?(:posts, column)
-    end
-
-    Post.with_deleted.where(id: post.id).update_all(cached)
-
-    if actions.first.present?
-      DiscourseEvent.trigger(:flag_reviewed, post)
-      DiscourseEvent.trigger(:flag_disagreed, actions.first)
-    end
-
-    update_flagged_posts_count
-
-    undo_hide_and_silence(post)
-  end
-
-  def self.defer_flags!(post, moderator, delete_post = false)
-    actions = PostAction.active
-      .where(post_id: post.id)
-      .where(post_action_type_id: PostActionType.notify_flag_type_ids)
-
-    actions.each do |action|
-      action.deferred_at = Time.zone.now
-      action.deferred_by_id = moderator.id
-      # so callback is called
-      action.save
-      action.add_moderator_post_if_needed(moderator, :deferred, delete_post)
-    end
-
-    if actions.first.present?
-      DiscourseEvent.trigger(:flag_reviewed, post)
-      DiscourseEvent.trigger(:flag_deferred, actions.first)
-    end
-
-    update_flagged_posts_count
   end
 
   def add_moderator_post_if_needed(moderator, disposition, delete_post = false)
@@ -287,13 +195,6 @@ class PostAction < ActiveRecord::Base
     ).perform
 
     result.success? ? result.post_action : nil
-  end
-
-  def self.undo_hide_and_silence(post)
-    return unless post.hidden?
-
-    post.unhide!
-    UserSilencer.unsilence(post.user) if UserSilencer.was_silenced_for?(post)
   end
 
   def self.copy(original_post, target_post)
@@ -453,19 +354,6 @@ class PostAction < ActiveRecord::Base
 
   end
 
-  def enforce_rules
-    post = Post.with_deleted.where(id: post_id).first
-    PostAction.auto_close_if_threshold_reached(post.topic)
-    PostAction.auto_hide_if_needed(user, post, post_action_type_key)
-    SpamRule::AutoSilence.new(post.user, post).perform
-  end
-
-  def create_user_action
-    if is_bookmark? || is_like?
-      UserActionCreator.log_post_action(self)
-    end
-  end
-
   def update_notifications
     if self.deleted_at.present?
       PostActionNotifier.post_action_deleted(self)
@@ -484,77 +372,9 @@ class PostAction < ActiveRecord::Base
 
   MAXIMUM_FLAGS_PER_POST = 3
 
-  def self.auto_close_threshold_reached?(topic)
-    return if topic.user&.staff?
-    flags = PostAction.active
-      .flags
-      .joins(:post)
-      .where("posts.topic_id = ?", topic.id)
-      .where("post_actions.user_id > 0")
-      .group("post_actions.user_id")
-      .pluck("post_actions.user_id, COUNT(post_id)")
-
-    # we need a minimum number of unique flaggers
-    return if flags.count < SiteSetting.num_flaggers_to_close_topic
-    # we need a minimum number of flags
-    return if flags.sum { |f| f[1] } < SiteSetting.num_flags_to_close_topic
-
-    true
-  end
-
-  def self.auto_close_if_threshold_reached(topic)
-    return if topic.nil? || topic.closed?
-    return unless auto_close_threshold_reached?(topic)
-
-    # the threshold has been reached, we will close the topic waiting for intervention
-    topic.update_status("closed", true, Discourse.system_user,
-      message: I18n.t(
-        "temporarily_closed_due_to_flags",
-        count: SiteSetting.num_hours_to_close_topic
-      )
-    )
-
-    topic.set_or_create_timer(
-      TopicTimer.types[:open],
-      SiteSetting.num_hours_to_close_topic,
-      by_user: Discourse.system_user
-    )
-  end
-
-  def self.auto_hide_if_needed(acting_user, post, post_action_type)
-    return if post.hidden?
-    return if (!acting_user.staff?) && post.user&.staff?
-
-    if post_action_type == :spam &&
-       acting_user.has_trust_level?(TrustLevel[3]) &&
-       post.user&.trust_level == TrustLevel[0]
-
-      hide_post!(post, post_action_type, Post.hidden_reasons[:flagged_by_tl3_user])
-
-    elsif PostActionType.auto_action_flag_types.include?(post_action_type)
-
-      if acting_user.has_trust_level?(TrustLevel[4]) &&
-         !acting_user.staff? &&
-         post.user&.trust_level != TrustLevel[4]
-
-        hide_post!(post, post_action_type, Post.hidden_reasons[:flagged_by_tl4_user])
-      elsif SiteSetting.flags_required_to_hide_post > 0
-
-        _old_flags, new_flags = PostAction.flag_counts_for(post.id)
-
-        if new_flags >= SiteSetting.flags_required_to_hide_post
-          hide_post!(post, post_action_type, guess_hide_reason(post))
-        end
-      end
-    end
-  end
-
   def self.hide_post!(post, post_action_type, reason = nil)
     return if post.hidden
-
-    unless reason
-      reason = guess_hide_reason(post)
-    end
+    reason ||= guess_hide_reason(post)
 
     hiding_again = post.hidden_at.present?
 

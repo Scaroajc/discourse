@@ -30,9 +30,11 @@ class PostActionCreator
     is_warning: false,
     message: nil,
     take_action: false,
-    flag_topic: false
+    flag_topic: false,
+    created_at: nil
   )
     @created_by = created_by
+    @created_at = created_at || Time.zone.now
 
     @post = post
     @post_action_type_id = post_action_type_id
@@ -81,9 +83,13 @@ class PostActionCreator
       if post_action.blank? || post_action.errors.present?
         result.add_errors_from(post_action)
       else
+        create_reviewable(result)
+        enforce_rules
+        UserActionManager.post_action_created(post_action)
+
         result.success = true
         result.post_action = post_action
-        create_reviewable(result)
+
       end
     rescue ActiveRecord::RecordNotUnique
       # If the user already performed this action, it's proably due to a different browser tab
@@ -101,6 +107,59 @@ class PostActionCreator
 
 private
 
+  def enforce_rules
+    auto_close_if_threshold_reached
+    auto_hide_if_needed
+    SpamRule::AutoSilence.new(@post.user, @post).perform
+  end
+
+  def auto_close_if_threshold_reached
+    return if topic.nil? || topic.closed?
+    return unless topic.auto_close_threshold_reached?
+
+    # the threshold has been reached, we will close the topic waiting for intervention
+    topic.update_status("closed", true, Discourse.system_user,
+      message: I18n.t(
+        "temporarily_closed_due_to_flags",
+        count: SiteSetting.num_hours_to_close_topic
+      )
+    )
+
+    topic.set_or_create_timer(
+      TopicTimer.types[:open],
+      SiteSetting.num_hours_to_close_topic,
+      by_user: Discourse.system_user
+    )
+  end
+
+  def auto_hide_if_needed
+    return if @post.hidden?
+    return if !@created_by.staff? && @post.user&.staff?
+
+    if @post_action_name == :spam &&
+       @created_by.has_trust_level?(TrustLevel[3]) &&
+       @post.user&.trust_level == TrustLevel[0]
+
+      PostAction.hide_post!(@post, @post_action_name, Post.hidden_reasons[:flagged_by_tl3_user])
+
+    elsif PostActionType.auto_action_flag_types.include?(@post_action_name)
+
+      if @created_by.has_trust_level?(TrustLevel[4]) &&
+         !@created_by.staff? &&
+         @post.user&.trust_level != TrustLevel[4]
+
+        PostAction.hide_post!(@post, @post_action_name, Post.hidden_reasons[:flagged_by_tl4_user])
+      elsif SiteSetting.flags_required_to_hide_post > 0
+
+        _old_flags, new_flags = PostAction.flag_counts_for(@post.id)
+
+        if new_flags >= SiteSetting.flags_required_to_hide_post
+          PostAction.hide_post!(@post, @post_action_name)
+        end
+      end
+    end
+  end
+
   def create_post_action
     targets_topic =
       if @flag_topic && @post.topic
@@ -116,7 +175,8 @@ private
     action_attrs = {
       staff_took_action: @take_action,
       related_post_id: @related_post_id,
-      targets_topic: !!targets_topic
+      targets_topic: !!targets_topic,
+      created_at: @created_at
     }
 
     # First try to revive a trashed record
@@ -144,8 +204,8 @@ private
     GivenDailyLike.increment_for(@created_by.id) if @post_action_type_id == PostActionType.types[:like]
 
     # agree with other flags
-    if @take_action
-      PostAction.agree_flags!(@post, @created_by)
+    if @take_action && reviewable = @post.reviewable_flag
+      reviewable.perform(@created_by, :agree)
       post_action.try(:update_counters)
     end
 
@@ -202,6 +262,7 @@ private
     result.reviewable = ReviewableFlaggedPost.needs_review!(
       created_by: @created_by,
       target: @post,
+      topic: @post.topic,
       reviewable_by_moderator: true
     )
     result.reviewable.add_score(@created_by, @post_action_type_id)
@@ -209,6 +270,10 @@ private
 
   def guardian
     @guardian ||= Guardian.new(@created_by)
+  end
+
+  def topic
+    @post.topic
   end
 
 end

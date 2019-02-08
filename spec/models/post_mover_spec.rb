@@ -44,7 +44,7 @@ describe PostMover do
         SiteSetting.queue_jobs = false
         p1.replies << p3
         p2.replies << p4
-        UserActionCreator.enable
+        UserActionManager.enable
         @like = PostActionCreator.like(another_user, p4)
       end
 
@@ -574,7 +574,7 @@ describe PostMover do
         SiteSetting.queue_jobs = false
         p1.replies << p3
         p2.replies << p4
-        UserActionCreator.enable
+        UserActionManager.enable
         @like = PostActionCreator.like(another_user, p4)
       end
 

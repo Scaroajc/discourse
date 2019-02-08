@@ -55,7 +55,6 @@ class Post < ActiveRecord::Base
   validates_with ::Validators::PostValidator, unless: :skip_validation
 
   after_save :index_search
-  after_save :create_user_action
 
   # We can pass several creating options to a post via attributes
   attr_accessor :image_sizes, :quoted_post_numbers, :no_bump, :invalidate_oneboxes, :cooking_options, :skip_unique_check, :skip_validation
@@ -455,8 +454,8 @@ class Post < ActiveRecord::Base
     post_actions.active.where(post_action_type_id: PostActionType.flag_types_without_custom.values)
   end
 
-  def has_active_flag?
-    active_flags.count != 0
+  def reviewable_flag
+    ReviewableFlaggedPost.pending.find_by(target: self)
   end
 
   def unhide!
@@ -817,10 +816,6 @@ class Post < ActiveRecord::Base
 
   def index_search
     SearchIndexer.index(self)
-  end
-
-  def create_user_action
-    UserActionCreator.log_post(self)
   end
 
   def locked?

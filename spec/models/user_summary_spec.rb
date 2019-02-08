@@ -39,7 +39,7 @@ describe UserSummary do
   end
 
   it "is robust enough to handle bad data" do
-    UserActionCreator.enable
+    UserActionManager.enable
 
     liked_post = create_post
     user = Fabricate(:user)

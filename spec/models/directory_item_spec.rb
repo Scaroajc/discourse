@@ -49,7 +49,7 @@ describe DirectoryItem do
 
   context 'refresh' do
     before do
-      UserActionCreator.enable
+      UserActionManager.enable
     end
 
     it "creates the record for the user and handles likes" do

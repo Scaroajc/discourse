@@ -3,7 +3,7 @@ require 'rails_helper'
 describe UserAction do
 
   before do
-    UserActionCreator.enable
+    UserActionManager.enable
   end
 
   it { is_expected.to validate_presence_of :action_type }
@@ -228,7 +228,7 @@ describe UserAction do
     end
 
     before do
-      @post = Fabricate(:old_post)
+      @post = create_post(created_at: DateTime.now - 100)
       process_alerts(@post)
     end
 
@@ -250,7 +250,8 @@ describe UserAction do
       before do
         @other_user = Fabricate(:coding_horror)
         @mentioned = Fabricate(:admin)
-        @response = Fabricate(:post, reply_to_post_number: 1, topic: @post.topic, user: @other_user, raw: "perhaps @#{@mentioned.username} knows how this works?")
+
+        @response = PostCreator.new(@other_user, reply_to_post_number: 1, topic_id: @post.topic_id, raw: "perhaps @#{@mentioned.username} knows how this works?").create
 
         process_alerts(@response)
       end
@@ -279,7 +280,7 @@ describe UserAction do
       @action = @user.user_actions.find_by(action_type: UserAction::BOOKMARK)
     end
 
-    it 'should create a bookmark action correctly' do
+    it 'creates the bookmark, and removes it properly' do
       expect(@action.action_type).to eq(UserAction::BOOKMARK)
       expect(@action.target_post_id).to eq(@post.id)
       expect(@action.acting_user_id).to eq(@user.id)

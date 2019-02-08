@@ -3,11 +3,11 @@ require "rails_helper"
 describe PostOwnerChanger do
   describe "change_owner!" do
     let!(:editor) { Fabricate(:admin) }
-    let(:topic) { Fabricate(:topic) }
     let(:user_a) { Fabricate(:user) }
-    let(:p1) { Fabricate(:post, topic: topic, post_number: 1) }
-    let(:p2) { Fabricate(:post, topic: topic, post_number: 2) }
-    let(:p3) { Fabricate(:post) }
+    let(:p1) { create_post(post_number: 1) }
+    let(:topic) { p1.topic }
+    let(:p2) { create_post(topic: topic, post_number: 2) }
+    let(:p3) { create_post }
 
     it "raises an error with a parameter missing" do
       expect {
@@ -22,8 +22,6 @@ describe PostOwnerChanger do
 
     it "changes the user" do
       bumped_at = topic.bumped_at
-
-      freeze_time 2.days.from_now
 
       old_user = p1.user
       PostActionCreator.like(user_a, p1)
@@ -84,7 +82,7 @@ describe PostOwnerChanger do
     end
 
     context "sets topic notification level for the new owner" do
-      let(:p4) { Fabricate(:post, post_number: 2, topic: topic) }
+      let(:p4) { create_post(post_number: 2, topic: topic) }
 
       it "'watching' if the first post gets a new owner" do
         PostOwnerChanger.new(post_ids: [p1.id], topic_id: topic.id, new_owner: user_a, acting_user: editor).change_owner!
@@ -125,7 +123,7 @@ describe PostOwnerChanger do
         UserAction.create!(action_type: UserAction::REPLY, user_id: p2user.id, acting_user_id: p2user.id,
                            target_post_id: p2.id, target_topic_id: p2.topic_id, created_at: p2.created_at)
 
-        UserActionCreator.enable
+        UserActionManager.enable
       end
 
       subject(:change_owners) do
